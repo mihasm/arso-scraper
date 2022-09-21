@@ -18,6 +18,9 @@ import warnings
 import plotext as plt
 import numpy as np
 from matplotlib import pyplot as plt2
+from bs4 import BeautifulSoup as bs
+
+
 
 
 # Ignore dateparser warnings regarding pytz
@@ -27,6 +30,10 @@ warnings.filterwarnings(
 )
 
 DATE_FORMATS = ["%d.%m.%Y","%Y-%m-%d","%m/%d/%Y","%Y"]
+STATION_TYPES = {4:"Automatic station",
+				 3:"Main station",
+				 2:"Climatological station",
+				 1:"Rainfall station"}
 
 def jsonify(j):
 	"""Converts JS code of object into JSON valid code, stringifying variables
@@ -84,31 +91,37 @@ def get_datasets():
 	"""
 	out = []
 	r = requests.get("https://meteo.arso.gov.si/webmet/archive/settings.xml?lang=en")
-	root = fromstring(r.content.decode("utf-8"))
-	text = root.text
-	j = re.search(r"^AcademaPUJS.set\((.+)\)$",text)[1]
+	
+	if r.status_code == 200:
 
-	a = json.loads(jsonify(j))
+		root = fromstring(r.content.decode("utf-8"))
+		text = root.text
+		j = re.search(r"^AcademaPUJS.set\((.+)\)$",text)[1]
 
-	for api_type in a["dt"]:
-		dv = api_type["dv"][0]
-		for group in dv["groups"]:
-			for param, param_value in group["params"].items():
-				out.append({
-					"id":param_value["pid"],
-					"short_string":param_value["s"],
-					"long_string":param_value["l"],
-					"group":group["gid"],
-					"group_description":group["desc"],
-					"api_type":dv["url"],
-					"api_desciption":api_type["desc"],
-					"has_interval":api_type["interval"],
-					"type_datepicker":api_type["datepicker"],
-					"min_date":api_type["mindate"],
-					"type":param_value["t"],
-				})
+		a = json.loads(jsonify(j))
 
-	return pandas.DataFrame.from_dict(out)
+		for api_type in a["dt"]:
+			dv = api_type["dv"][0]
+			for group in dv["groups"]:
+				for param, param_value in group["params"].items():
+					out.append({
+						"id":param_value["pid"],
+						"short_string":param_value["s"],
+						"long_string":param_value["l"],
+						"group":group["gid"],
+						"group_description":group["desc"],
+						"api_type":dv["url"],
+						"api_desciption":api_type["desc"],
+						"has_interval":api_type["interval"],
+						"type_datepicker":api_type["datepicker"],
+						"min_date":api_type["mindate"],
+						"type":param_value["t"],
+					})
+
+		return pandas.DataFrame.from_dict(out)
+	else:
+		print(r.text)
+		exit()
 
 def get_locations(d1,d2,types):
 	"""Get available locations per types and selected dates
@@ -121,6 +134,7 @@ def get_locations(d1,d2,types):
 	out = []
 	types_str = ",".join(types)
 	url = "https://meteo.arso.gov.si/webmet/archive/locations.xml?d1=%s&d2=%s&type=%s"%(d1,d2,types_str)
+	print(url)
 	r = requests.get(url)
 	root = fromstring(r.content.decode("utf-8"))
 	text = root.text
@@ -134,7 +148,9 @@ def get_locations(d1,d2,types):
 			"lat":v["lat"],
 			"alt":v["alt"],
 			"type":v["type"],
+			"type_desc":STATION_TYPES[int(v["type"])],
 		})
+	out = sorted(out, key=lambda x: x["location_name"])
 	return pandas.DataFrame.from_dict(out)
 
 datasets = get_datasets()
@@ -166,27 +182,52 @@ def get_data(api_type,group,params,loc,d1,d2):
 					"time":time,
 					"time_str":time_str,
 					"values":values,
+					"parameters":a["params"],
 				})
-				for p_id,p_val in values.items():
-					out[-1]["data_"+p_id] = float(p_val)
-				
-				value_str = ""
+
 				table.append([time_str])
-				for p_id,p_val in values.items():
-					table[-1].append(p_val)
-		print(tabulate.tabulate(table,headers=["Date",*[v["l"] for k,v in a["params"].items()]]))
+
+				for p_id,_ in a["params"].items():
+					if p_id in values.keys():
+						p_val = values[p_id]
+					else:
+						p_val = ""
+					
+					if p_val == "yes":
+						val = 1
+					elif p_val == "no":
+						val = 0
+					elif p_val != "":
+						val = float(p_val)
+					else:
+						val = None
+						
+					out[-1]["data_"+p_id] = val
+					if p_val != "":
+						table[-1].append(p_val+" "+a["params"][p_id]["unit"])
+					else:
+						table[-1].append("")
+		print(tabulate.tabulate(table,headers=["Date",*[v["s"] for k,v in a["params"].items()]]))
 		return pandas.DataFrame.from_dict(out)
 	else:
 		print(r.text)
+		exit()
 
 def plot_data(data,title):
-	dates = plt.datetimes_to_string(data[:,0])
-	idx = np.linspace(0,len(dates)-1,10)
-	dates_ticks = [dates[int(i)] for i in idx]
+	COLORS = ["blue+", "green+", "red+", "cyan+", "magenta+", "yellow", "gray",
+				  "blue", "green", "red", "cyan", "magenta", "gold", "black"]
+
+	datetimes = list(data.time)
+	dates_ticks = [d.strftime("%y-%m-%d %H:%M") for d in datetimes]
 	plt.clear_figure()
-	plt.xticks(idx,dates_ticks)
-	plt.bar(data[:,1],color="cyan")
-	plt.title(title)
+	rows,columns = data.shape
+	j=0
+	for p_id in data.loc[0,"parameters"].keys():
+		y = list(data.loc[:,"data_"+str(p_id)])
+		if not y.count(None) == len(y):
+			plt.plot(y,color=COLORS[j],label=data.loc[0,"parameters"][p_id]["s"])
+			j+=1
+	plt.xticks(range(len(dates_ticks)),dates_ticks)
 	plt.canvas_color("black")
 	plt.axes_color("black")
 	plt.ticks_color("white")
@@ -203,7 +244,7 @@ def main():
 	if debug:
 		num_api = 0
 	else:
-		num_api = int(input(""))
+		num_api = int(input(">"))
 	selected = datasets.loc[datasets["api_type"]==apis[num_api]].reset_index(drop=True)
 	
 	print("Select group:")
@@ -212,7 +253,7 @@ def main():
 	if debug:
 		num_group = 0
 	else:
-		num_group = int(input(""))
+		num_group = int(input(">"))
 	selected = selected.loc[selected["group"]==groups[num_group]].reset_index(drop=True)
 	
 	print("Select parameters:")
@@ -220,9 +261,9 @@ def main():
 		print(i,selected.loc[i].short_string)
 
 	if debug:
-		params = "0"
+		params = "3,4,5"
 	else:
-		params = input("")
+		params = input(">")
 	params_selected_list = params.split(",")
 	params_ints = [int(param) for param in params_selected_list]
 	p = selected.loc[params_ints[0]]
@@ -230,22 +271,22 @@ def main():
 	param_names = ",".join([selected.loc[params_ints[i]].long_string for i in range(len(params_selected_list))])
 	
 	if debug:
-		d1 = "2020-01-01"
+		d1 = "2015-01-01"
 	else:
 		d1 = dateparser.parse(input("Start date:\n"),date_formats=DATE_FORMATS).strftime("%Y-%m-%d")
 	if debug:
-		d2 = "2020-01-02"
+		d2 = "2015-01-02"
 	else:
 		d2 = dateparser.parse(input("End date:\n"),date_formats=DATE_FORMATS).strftime("%Y-%m-%d")
 
 	locs = get_locations(d1,d2,p.type)
-	print("Select location:")
 	for i in range(len(locs.index)):
-		print(i,locs.loc[i].location_name)
+		_l = locs.loc[i]
+		print(i,_l.location_name,"("+_l.type_desc+")")
 	if debug:
-		num_loc = 105
+		num_loc = 1
 	else:
-		num_loc = int(input(""))
+		num_loc = int(input(">"))
 	l = locs.loc[num_loc]
 
 	data = get_data(api_type=p.api_type,
@@ -255,9 +296,7 @@ def main():
 			 d1=d1,
 			 d2=d2)
 
-	data = data.drop(["timestamp","time_str","location_id", "values"],axis=1)
-	data_np = data.to_numpy()
-	plot_data(data_np,param_names)
+	plot_data(data,param_names)
 
 
 main()
