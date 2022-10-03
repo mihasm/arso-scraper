@@ -20,9 +20,6 @@ import numpy as np
 from matplotlib import pyplot as plt2
 from bs4 import BeautifulSoup as bs
 
-
-
-
 # Ignore dateparser warnings regarding pytz
 warnings.filterwarnings(
     "ignore",
