@@ -108,7 +108,7 @@ def get_datasets():
 						"group":group["gid"],
 						"group_description":group["desc"],
 						"api_type":dv["url"],
-						"api_desciption":api_type["desc"],
+						"api_description":api_type["desc"],
 						"has_interval":api_type["interval"],
 						"type_datepicker":api_type["datepicker"],
 						"min_date":api_type["mindate"],
@@ -151,6 +151,8 @@ def get_locations(d1,d2,types):
 	return pandas.DataFrame.from_dict(out)
 
 datasets = get_datasets()
+datasets_p = datasets.drop(["id","has_interval","group_description","type_datepicker","type","api_description","short_string","min_date"],axis=1)
+#print(tabulate.tabulate(datasets_p,headers="keys"))
 #get_locations(datetime.datetime(year=2020,month=9,day=10),datetime.datetime(year=2020,month=9,day=11),["1","2","3"])
 
 def get_data(api_type,group,params,loc,d1,d2):
@@ -158,11 +160,10 @@ def get_data(api_type,group,params,loc,d1,d2):
 	url = "https://meteo.arso.gov.si/webmet/archive/data.xml?lang=en&vars=%s&group=%s&type=%s&id=%s&d1=%s&d2=%s" % (
 		params,group,api_type,loc,d1,d2
 	)
+	#print(url)
 	r = requests.get(url)
-	print(url)
 
 	if r.status_code == 200:
-		table = []
 
 		root = fromstring(r.content.decode("utf-8"))
 		text = root.text
@@ -182,8 +183,6 @@ def get_data(api_type,group,params,loc,d1,d2):
 					"parameters":a["params"],
 				})
 
-				table.append([time_str])
-
 				for p_id,_ in a["params"].items():
 					if p_id in values.keys():
 						p_val = values[p_id]
@@ -198,13 +197,9 @@ def get_data(api_type,group,params,loc,d1,d2):
 						val = float(p_val)
 					else:
 						val = None
-						
+
 					out[-1]["data_"+p_id] = val
-					if p_val != "":
-						table[-1].append(p_val+" "+a["params"][p_id]["unit"])
-					else:
-						table[-1].append("")
-		print(tabulate.tabulate(table,headers=["Date",*[v["s"] for k,v in a["params"].items()]]))
+
 		return pandas.DataFrame.from_dict(out)
 	else:
 		print(r.text)
@@ -220,7 +215,7 @@ def plot_data(data,title):
 	rows,columns = data.shape
 	j=0
 	for p_id in data.loc[0,"parameters"].keys():
-		y = list(data.loc[:,"data_"+str(p_id)])
+		y = list(data.loc[:,"data_"+p_id])
 		if not y.count(None) == len(y):
 			plt.plot(y,color=COLORS[j],label=data.loc[0,"parameters"][p_id]["s"])
 			j+=1
@@ -230,70 +225,98 @@ def plot_data(data,title):
 	plt.ticks_color("white")
 	plt.show()
 
+def split_date_range(start_str,end_str,days=90):
+	start = datetime.datetime.strptime(start_str,"%Y-%m-%d")
+	end = datetime.datetime.strptime(end_str,"%Y-%m-%d")
+	if start+datetime.timedelta(days=days) > end:
+		return [(start_str,end_str)]
+	else:
+		out = []
+		next_start = start
+		while True:
+			start_plus_delta = next_start+datetime.timedelta(days=days)
+			if start_plus_delta >= end:
+				out.append((datetime.datetime.strftime(next_start,"%Y-%m-%d"),datetime.datetime.strftime(end,"%Y-%m-%d")))
+				break
+			else:
+				out.append((datetime.datetime.strftime(next_start,"%Y-%m-%d"),datetime.datetime.strftime(start_plus_delta,"%Y-%m-%d")))
+				next_start = start_plus_delta+datetime.timedelta(days=1)
+	return out
+
 
 def main():
-
-	debug = False
-
 	print("Select API:")
 	apis = datasets.api_type.unique()
 	[print(i, apis[i]) for i in range(len(apis))]
-	if debug:
-		num_api = 0
-	else:
-		num_api = int(input(">"))
+	num_api = int(input(">"))
 	selected = datasets.loc[datasets["api_type"]==apis[num_api]].reset_index(drop=True)
-	
-	print("Select group:")
-	groups = selected.group.unique()
-	[print(i, apis[i]) for i in range(len(groups))]
-	if debug:
-		num_group = 0
-	else:
-		num_group = int(input(">"))
-	selected = selected.loc[selected["group"]==groups[num_group]].reset_index(drop=True)
 	
 	print("Select parameters:")
 	for i in range(len(selected.index)):
 		print(i,selected.loc[i].short_string)
 
-	if debug:
-		params = "3,4,5"
-	else:
-		params = input(">")
+	params = input(">")
 	params_selected_list = params.split(",")
 	params_ints = [int(param) for param in params_selected_list]
 	p = selected.loc[params_ints[0]]
 	params_ids = ",".join([selected.loc[params_ints[i]].id for i in range(len(params_selected_list))])
 	param_names = ",".join([selected.loc[params_ints[i]].long_string for i in range(len(params_selected_list))])
 	
-	if debug:
-		d1 = "2015-01-01"
-	else:
-		d1 = dateparser.parse(input("Start date:\n"),date_formats=DATE_FORMATS).strftime("%Y-%m-%d")
-	if debug:
-		d2 = "2015-01-02"
-	else:
-		d2 = dateparser.parse(input("End date:\n"),date_formats=DATE_FORMATS).strftime("%Y-%m-%d")
+	d1 = dateparser.parse(input("Start date:\n"),date_formats=DATE_FORMATS)
+	d2 = dateparser.parse(input("End date:\n"),date_formats=DATE_FORMATS)
+
+	d1 = d1.strftime("%Y-%m-%d")
+	d2 = d2.strftime("%Y-%m-%d")
 
 	locs = get_locations(d1,d2,p.type)
 	for i in range(len(locs.index)):
 		_l = locs.loc[i]
 		print(i,_l.location_name,"("+_l.type_desc+")")
-	if debug:
-		num_loc = 1
-	else:
-		num_loc = int(input(">"))
+	num_loc = int(input(">"))
 	l = locs.loc[num_loc]
 
-	data = get_data(api_type=p.api_type,
-			 group=p.group,
-			 params=params_ids,
-			 loc=l.id,
-			 d1=d1,
-			 d2=d2)
+	if p.api_type == "halfhourly":
+		dates = split_date_range(d1,d2)
+		if len(dates) > 1:
+			print("Splitting date range into smaller chunks...")
+	else:
+		dates = [(d1,d2)]
+	data = pandas.DataFrame()
+	for _d1,_d2 in dates:
+		print("%s to %s, %s, %s" % (_d1,_d2,param_names, l.location_name))
+		_data = get_data(api_type=p.api_type,
+				 group=p.group,
+				 params=params_ids,
+				 loc=l.id,
+				 d1=_d1,
+				 d2=_d2)
+		data = pandas.concat([data,_data]).reset_index(drop=True)
 
-	plot_data(data,param_names)
+	if data.shape[0] > 0:
+		data_columns = [k for k in data.keys() if "data_" in k]
+		data_ids = [p.replace("data_","") for p in data_columns]
+		parameters = data.loc[0,"parameters"]
+		data_headers = [parameters[p_id]["s"] for p_id in data_ids]
+		data_print=data[["time"]+data_columns]
+		rename_dict = {}
+		for _col in data_columns:
+			_id = _col.replace("data_","")
+			rename_dict[_col] = parameters[_id]["s"]
+		data_print.rename(columns=rename_dict,inplace=True)
+		print(tabulate.tabulate(data_print,headers=["Time"]+data_headers,showindex=False))
+		plot_data(data,param_names)
+	else:
+		print("No data from the selected station in the given time range!")
+
+	while True:
+		_save = input("Save data? [y/n]\n>")
+		if _save in ["y","n"]:
+			break
+
+	if _save == "y":
+		_name = input("Please enter desired file name:\n>")
+		data_print.to_excel(_name+".xlsx")
+		print("File saved!")
 
 
 main()
