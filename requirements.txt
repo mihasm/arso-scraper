@@ -1,0 +1,9 @@
+requests
+jsbeautifier
+pandas
+tabulate
+dateparser
+plotext
+numpy
+matplotlib
+bs4

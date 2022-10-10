@@ -1,7 +1,9 @@
-"""Summary
+"""CLI application for scraping weather data from https://meteo.arso.gov.si/webmet/archive/
 
 Attributes:
-    datasets (TYPE): Description
+    API_TYPES (dict): Defines data frequency in Hz
+    DATE_FORMATS (list): Valid date formats
+    STATION_TYPES (dict): Names of climatological station types
 """
 import requests
 from xml.etree.ElementTree import fromstring
@@ -19,6 +21,7 @@ import plotext as plt
 import numpy as np
 from matplotlib import pyplot as plt2
 from bs4 import BeautifulSoup as bs
+import os
 
 # Ignore dateparser warnings regarding pytz
 warnings.filterwarnings(
@@ -32,14 +35,26 @@ STATION_TYPES = {4:"Automatic station",
 				 2:"Climatological station",
 				 1:"Rainfall station"}
 
+API_TYPES = { # data frequency in Hz
+	"halfhourly":1/(30*60), # halfhourly
+	"daily":1/(24*60*60), # daily
+	"monthly":1/(30*24*60*60), # monthly
+	"yearly":1/(365*24*60*60), # yearly
+	"yearly-with-months":1/(12*24*60*60), # yearly-with-months
+}
+
 def jsonify(j):
 	"""Converts JS code of object into JSON valid code, stringifying variables
+
+	Example:
+	'{a:1,b:{"2":3,c:"d"}}'
+	'{"a":1,"b":{"2":3,c:"d"}}'
 	
 	Args:
-	    j (TYPE): Description
+	    j (str): Javascript object code
 	
 	Returns:
-	    TYPE: Description
+	    str: JSON-ified code
 	"""
 	out = ""
 	inside_string = False
@@ -81,10 +96,10 @@ def jsonify(j):
 	return out
 
 def get_datasets():
-	"""Summary
+	"""Calls endpoint for fetching available datasets.
 	
 	Returns:
-	    TYPE: Description
+	    DataFrame: Datasets from api.
 	"""
 	out = []
 	r = requests.get("https://meteo.arso.gov.si/webmet/archive/settings.xml?lang=en")
@@ -121,12 +136,15 @@ def get_datasets():
 		exit()
 
 def get_locations(d1,d2,types):
-	"""Get available locations per types and selected dates
+	"""Calls and fetches available locations as per types and selected dates.
 	
 	Args:
 	    d1 (str): YYYY-MM-DD
 	    d2 (str): YYYY-MM-DD
 	    types (list): ["1","2","3","4"] or any combination
+	
+	Returns:
+	    DataFrame: List of available locations.
 	"""
 	out = []
 	types_str = ",".join(types)
@@ -151,26 +169,39 @@ def get_locations(d1,d2,types):
 	return pandas.DataFrame.from_dict(out)
 
 datasets = get_datasets()
-datasets_p = datasets.drop(["id","has_interval","group_description","type_datepicker","type","api_description","short_string","min_date"],axis=1)
-#print(tabulate.tabulate(datasets_p,headers="keys"))
-#get_locations(datetime.datetime(year=2020,month=9,day=10),datetime.datetime(year=2020,month=9,day=11),["1","2","3"])
 
 def get_data(api_type,group,params,loc,d1,d2):
+	"""Calls data-fetch API endpoint.
+	
+	Args:
+	    api_type (str): halfhourly,daily,etc.
+	    group (str): type of group
+	    params (str): comma-separated list of parameters
+	    loc (str): location id
+	    d1 (str): start date
+	    d2 (str): end date
+	
+	Returns:
+	    DataFrame: Data
+	"""
 	out = []
 	url = "https://meteo.arso.gov.si/webmet/archive/data.xml?lang=en&vars=%s&group=%s&type=%s&id=%s&d1=%s&d2=%s" % (
 		params,group,api_type,loc,d1,d2
 	)
-	#print(url)
 	r = requests.get(url)
-
+	print(url)
 	if r.status_code == 200:
-
 		root = fromstring(r.content.decode("utf-8"))
 		text = root.text
 		j = re.search(r"^AcademaPUJS.set\((.+)\)$",text)[1]
 		as_json = jsonify(j)
 		a = json.loads(as_json)
 		for loc_id,points in a["points"].items():
+			if api_type == "yearly-with-months":
+				points_yearly = {}
+				for y,_vals in points.items():
+					points_yearly = {**points_yearly,**_vals["t"]}
+				points = points_yearly
 			for timestamp,values in points.items():
 				time = datetime.datetime(year=1800,month=1,day=1)+datetime.timedelta(minutes=int(timestamp.replace("_","")))
 				time_str = time.strftime("%Y-%m-%d %H:%M")
@@ -206,6 +237,12 @@ def get_data(api_type,group,params,loc,d1,d2):
 		exit()
 
 def plot_data(data,title):
+	"""Plots graph from data in terminal.
+	
+	Args:
+	    data (DataFrame): data from get_data function
+	    title (str): Title of graph
+	"""
 	COLORS = ["blue+", "green+", "red+", "cyan+", "magenta+", "yellow", "gray",
 				  "blue", "green", "red", "cyan", "magenta", "gold", "black"]
 
@@ -225,26 +262,87 @@ def plot_data(data,title):
 	plt.ticks_color("white")
 	plt.show()
 
-def split_date_range(start_str,end_str,days=90):
+def split_date_range(start_str,end_str,days=90,split_at_year=False):
+	"""Splits date range into multiple ranges.
+
+	Splits by days, optionally can split every new year.
+	
+	Args:
+	    start_str (str): start date (YYYY-MM-DD)
+	    end_str (str): end date (YYYY-MM-DD)
+	    days (int, optional): days after which a split is done
+	    split_at_year (bool, optional): splits every new year if True
+	
+	Returns:
+	    list: list of date ranges in format [(d1_start,d1_end),(d2_start,d2_end),...]
+	"""
 	start = datetime.datetime.strptime(start_str,"%Y-%m-%d")
 	end = datetime.datetime.strptime(end_str,"%Y-%m-%d")
-	if start+datetime.timedelta(days=days) > end:
-		return [(start_str,end_str)]
-	else:
-		out = []
-		next_start = start
-		while True:
-			start_plus_delta = next_start+datetime.timedelta(days=days)
-			if start_plus_delta >= end:
-				out.append((datetime.datetime.strftime(next_start,"%Y-%m-%d"),datetime.datetime.strftime(end,"%Y-%m-%d")))
-				break
-			else:
-				out.append((datetime.datetime.strftime(next_start,"%Y-%m-%d"),datetime.datetime.strftime(start_plus_delta,"%Y-%m-%d")))
-				next_start = start_plus_delta+datetime.timedelta(days=1)
+
+	out = []
+	current_range_start = start
+	while True:
+		current_range_end = current_range_start+datetime.timedelta(days=days)
+		if split_at_year:
+			if current_range_end.year > current_range_start.year:
+				current_range_end = datetime.datetime(year=current_range_start.year,month=12,day=31)
+		if current_range_end >= end:
+			out.append((datetime.datetime.strftime(current_range_start,"%Y-%m-%d"),datetime.datetime.strftime(end,"%Y-%m-%d")))
+			break
+		else:
+			out.append((datetime.datetime.strftime(current_range_start,"%Y-%m-%d"),datetime.datetime.strftime(current_range_end,"%Y-%m-%d")))
+			current_range_start = current_range_end+datetime.timedelta(days=1)
 	return out
+
+def get_data_nice(api_type,group,params,loc,d1,d2):
+	"""Helper function for getting data, implements date splitting.
+
+	Arguments are same as for get_data function.
+	
+	Args:
+	    api_type (str): halfhourly,daily,etc.
+	    group (str): type of group
+	    params (str): comma-separated list of parameters
+	    loc (str): location id
+	    d1 (str): start date
+	    d2 (str): end date
+	
+	Returns:
+	    DataFrame: data
+	"""
+	d_start = dateparser.parse(d1,date_formats=DATE_FORMATS)
+	d_end = dateparser.parse(d2,date_formats=DATE_FORMATS)
+	delta_t = d_end-d_start
+	seconds = delta_t.total_seconds()
+	days = delta_t.days
+	frequency = API_TYPES[api_type]
+	num_parameters = len(",".split(params))
+	expected_data_points = frequency*seconds*num_parameters
+	chunks_needed = expected_data_points/1000
+	chunks_needed = 1 if chunks_needed < 1 else int(chunks_needed)
+	days_per_chunk = int(days/chunks_needed)
+
+	if api_type == "yearly-with-months":
+		split_every_year=True
+	else:
+		split_every_year=False
+	dates = split_date_range(d1,d2,days=days_per_chunk,split_at_year=split_every_year)
+	data = pandas.DataFrame()
+	for _d1,_d2 in dates:
+		print("Date range: %s -> %s" % (_d1,_d2))
+		_data = get_data(api_type=api_type,
+				 group=group,
+				 params=params,
+				 loc=loc,
+				 d1=_d1,
+				 d2=_d2)
+		data = pandas.concat([data,_data]).reset_index(drop=True)
+	return data
 
 
 def main():
+	"""Main function
+	"""
 	print("Select API:")
 	apis = datasets.api_type.unique()
 	[print(i, apis[i]) for i in range(len(apis))]
@@ -255,15 +353,35 @@ def main():
 	for i in range(len(selected.index)):
 		print(i,selected.loc[i].short_string)
 
-	params = input(">")
-	params_selected_list = params.split(",")
-	params_ints = [int(param) for param in params_selected_list]
-	p = selected.loc[params_ints[0]]
-	params_ids = ",".join([selected.loc[params_ints[i]].id for i in range(len(params_selected_list))])
-	param_names = ",".join([selected.loc[params_ints[i]].long_string for i in range(len(params_selected_list))])
+	while True:
+		try:
+			params = input(">")
+			params_selected_list = params.split(",")
+			params_ints = [int(param) for param in params_selected_list]
+			p = selected.loc[params_ints[0]]
+			params_ids = ",".join([selected.loc[params_ints[i]].id for i in range(len(params_selected_list))])
+			param_names = ",".join([selected.loc[params_ints[i]].long_string for i in range(len(params_selected_list))])
+			break
+		except:
+			print("Invalid parameters specified, please try again.")
+			pass
+
 	
-	d1 = dateparser.parse(input("Start date:\n"),date_formats=DATE_FORMATS)
-	d2 = dateparser.parse(input("End date:\n"),date_formats=DATE_FORMATS)
+	while True:
+		try:
+			d1 = dateparser.parse(input("Start date:\n"),date_formats=DATE_FORMATS)
+			break
+		except:
+			print("Invalid date specified, please try again.")
+			pass
+
+	while True:
+		try:
+			d2 = dateparser.parse(input("End date:\n"),date_formats=DATE_FORMATS)
+			break
+		except:
+			print("Invalid date specified, please try again.")
+			pass
 
 	d1 = d1.strftime("%Y-%m-%d")
 	d2 = d2.strftime("%Y-%m-%d")
@@ -272,25 +390,17 @@ def main():
 	for i in range(len(locs.index)):
 		_l = locs.loc[i]
 		print(i,_l.location_name,"("+_l.type_desc+")")
-	num_loc = int(input(">"))
-	l = locs.loc[num_loc]
+	
+	while True:
+		try:
+			num_loc = int(input(">"))
+			l = locs.loc[num_loc]
+			break
+		except:
+			print("Invalid location specified, please try again.")
+			pass
 
-	if p.api_type == "halfhourly":
-		dates = split_date_range(d1,d2)
-		if len(dates) > 1:
-			print("Splitting date range into smaller chunks...")
-	else:
-		dates = [(d1,d2)]
-	data = pandas.DataFrame()
-	for _d1,_d2 in dates:
-		print("%s to %s, %s, %s" % (_d1,_d2,param_names, l.location_name))
-		_data = get_data(api_type=p.api_type,
-				 group=p.group,
-				 params=params_ids,
-				 loc=l.id,
-				 d1=_d1,
-				 d2=_d2)
-		data = pandas.concat([data,_data]).reset_index(drop=True)
+	data = get_data_nice(api_type=p.api_type,group=p.group,params=params_ids,loc=l.id,d1=d1,d2=d2)
 
 	if data.shape[0] > 0:
 		data_columns = [k for k in data.keys() if "data_" in k]
@@ -307,6 +417,7 @@ def main():
 		plot_data(data,param_names)
 	else:
 		print("No data from the selected station in the given time range!")
+		exit()
 
 	while True:
 		_save = input("Save data? [y/n]\n>")
