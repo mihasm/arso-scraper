@@ -23,6 +23,8 @@ from matplotlib import pyplot as plt2
 from bs4 import BeautifulSoup as bs
 import os
 import time
+import math
+
 
 pandas.options.mode.chained_assignment = None  # default='warn'
 # Ignore dateparser warnings regarding pytz
@@ -44,6 +46,27 @@ API_TYPES = { # data frequency in Hz
 	"yearly":1/(365*24*60*60), # yearly
 	"yearly-with-months":1/(12*24*60*60), # yearly-with-months
 }
+
+def progressbar(num_done,total,prepend="",additional="",length=20):
+	"""Prints and flushes a simple progress bar.
+	
+	Args:
+	    num_done (int): Number of steps done
+	    total (int): Total number of steps
+	    additional (str, optional): String to append
+	    length (int, optional): Number of characters for progressbar
+	"""
+	coeff = float(num_done) / float(total)
+	progress = coeff if coeff <= 1 else 1
+	chars_done = int(round(length * progress))
+	chars_finished = length - chars_done
+	text = "\r %s [%s] %5.1f %% %s" % (
+		prepend,
+		"#" * chars_done + "-" * chars_finished, 
+		progress * 100,
+		additional
+	)
+	print(text,end="",flush=True)
 
 def jsonify(j):
 	"""Converts JS code of object into JSON valid code, stringifying variables
@@ -151,7 +174,6 @@ def get_locations(d1,d2,types):
 	out = []
 	types_str = ",".join(types)
 	url = "https://meteo.arso.gov.si/webmet/archive/locations.xml?d1=%s&d2=%s&type=%s"%(d1,d2,types_str)
-	print(url)
 	r = requests.get(url)
 	root = fromstring(r.content.decode("utf-8"))
 	text = root.text
@@ -190,7 +212,6 @@ def get_data(api_type,params,loc,d1,d2):
 		params,api_type,loc,d1,d2
 	)
 	r = requests.get(url)
-	print(url)
 	if r.status_code == 200:
 		root = fromstring(r.content.decode("utf-8"))
 		text = root.text
@@ -207,6 +228,7 @@ def get_data(api_type,params,loc,d1,d2):
 				time = datetime.datetime(year=1800,month=1,day=1)+datetime.timedelta(minutes=int(timestamp.replace("_","")))
 				values_combined = {}
 				for _par_id,_val in values.items():
+
 					if _val == "yes":
 						_val = 1
 					elif _val == "no":
@@ -217,6 +239,7 @@ def get_data(api_type,params,loc,d1,d2):
 						_val = float(_val)
 
 					values_combined[_par_id] = {"value":_val,"parameter_info":a["params"][_par_id]}
+				
 				out.append({
 					"location_id":loc_id.replace("_",""),
 					"time":time,
@@ -280,20 +303,12 @@ def get_data_nice(api_type,params,loc,d1,d2):
 	delta_t = d_end-d_start
 	seconds = delta_t.total_seconds()
 	days = delta_t.days
-	print("Days between dates",days)
 	frequency = API_TYPES[api_type]
-	print("Sample period",1/frequency)
 	num_parameters = len(params.split(","))
-	#num_locations = len(loc.split(","))
-	print("Number of parameters:",num_parameters)
-	#print("Number of locations:",num_locations)
 	expected_data_points = frequency*seconds*num_parameters#*num_locations
-	print("Expecting",expected_data_points,"data points")
 	chunks_needed = expected_data_points/5000
 	chunks_needed = 1 if chunks_needed < 1 else int(chunks_needed)
-	print("Chunks needed",chunks_needed)
 	days_per_chunk = int(days/chunks_needed)
-	print("Days per chunk",days_per_chunk)
 
 	if api_type == "yearly-with-months":
 		split_every_year=True
@@ -301,77 +316,102 @@ def get_data_nice(api_type,params,loc,d1,d2):
 		split_every_year=False
 	dates = split_date_range(d1,d2,days=days_per_chunk,split_at_year=split_every_year)
 	data = pandas.DataFrame()
-	for _loc in loc.split(","):
+	locations_list = loc.split(",")
+	num_operations = len(locations_list)*len(dates)
+	i = 0
+	for _loc in locations_list:
 		for _d1,_d2 in dates:
-			print("Date range: %s -> %s" % (_d1,_d2))
 			_data = get_data(api_type=api_type,
 					 params=params,
 					 loc=_loc,
 					 d1=_d1,
 					 d2=_d2)
 			data = pandas.concat([data,_data]).reset_index(drop=True)
+			i+=1
+			progressbar(i,num_operations,"Fetching data")
 	return data
 
-def plot_data(data,locs):
+def format_data(data,locs):
+	parameters = {}
+	for v in data.values:
+		for k,v in v[2].items():
+			if not k in parameters.keys():
+				parameters[k] = v["parameter_info"]
+			else:
+				if v["parameter_info"]["pid"] != parameters[k]["pid"]:
+					raise Exception("Parameter %s is not the same type across requests" % k)
+	locations = {}
+	for loc_id in set(data.location_id):
+		locations[loc_id] = locs.loc[locs["id"]==loc_id].to_dict('records')[0]
+	datetimes = sorted(list(set(data.time)))
+
+	datetimes_rows = {}
+	for i in range(len(datetimes)):
+		datetimes_rows[datetimes[i]]=i
+
+	headerlist = []
+	out = {"time":datetimes}
+	for pid,parameter_values in parameters.items():
+		for loc_id,loc_dict in locations.items():
+			header = loc_dict["location_name"]+"/"+parameter_values["s"]
+			out[header] = [None]*len(datetimes)
+			headerlist.append(header)
+
+	num_operations = len(list(data.iterrows()))
+	n=0
+	for index, row in data.iterrows():
+		location_name = locs.loc[locs["id"]==row["location_id"]].location_name.to_string(index=False)
+		for param_id,values in row["values"].items():
+			header = location_name+"/"+row["values"][param_id]["parameter_info"]["s"]
+			i = datetimes_rows[row["time"]]
+			out[header][i]=row["values"][param_id]["value"]
+			n+=1
+			progressbar(n,num_operations,"Aggregating data")
+	print("")
+
+	print("Counting empty rows")
+	rows_to_delete = []
+	for i in range(len(out["time"])):
+		num_empty = 0
+		for header in headerlist:
+			if out[header][i] == None:
+				num_empty+=1
+		if num_empty == len(headerlist):
+			rows_to_delete.append(i)
+	print(rows_to_delete)
+
+	print("Deleting empty rows")
+	for name,lst in out.items():
+		out[name] = list(np.delete(out[name],rows_to_delete))
+
+	out = pandas.DataFrame.from_dict(out)
+	return out
+
+def plot_data(data):
 	"""Plots graph from data in terminal.
 	
 	Args:
 	    data (DataFrame): data from get_data function
 	"""
 
-	
-
 	COLORS = ["blue+", "green+", "red+", "cyan+", "magenta+", "yellow", "gray",
 				  "blue", "green", "red", "cyan", "magenta", "gold", "black"]
 	COLORS = 100*COLORS # in case we run out of colors
 
-	datetimes = list(data.time)
-
-	values = data.values
-	parameters = set()
-	for v in values:
-		for k in v[2].keys():
-			parameters.add(k)
-
-	locations = set(data.location_id)
-
-	num_samples = int(len(datetimes)/len(locations))
-	datetimes = datetimes[:num_samples]
-	dates_ticks = [d.strftime("%d.%m.%Y %H:%M") for d in datetimes]
-	#print("Length x",len(dates_ticks))
-	out = {"time":data.time[:num_samples]}
-
 	plt.clear_figure()
 
 	j=0
-	for _loc in locations:
-		for param in parameters:
-			x,y = [],[]
-			parameter_name = ""
-			for v in values:
-				if v[0] == _loc:
-					x.append(v[1].timestamp())
-					if param in v[2]:
-						y.append(v[2][param]["value"])
-						parameter_name = v[2][param]["parameter_info"]["s"]
-					else:
-						y.append(None)
-			loc_sel = locs.loc[locs['id']==_loc]
-			_label = "%s_%s"%(loc_sel.location_name.to_string(index=False),parameter_name)
-			if y.count(None) < len(y):
-				# check if y is not made up only of None - that case creates problems
-				plt.plot(x,y,color=COLORS[j],label=_label)
-				j+=1
-		
-			out["data_%s"%_label] = y
+	time = data.time
+	for col in data.columns[1:]:
+		y = data[col].to_numpy()
+		plt.plot(y,color=COLORS[j],label=col)
+		j+=1
 
 	#plt.xticks(range(len(dates_ticks)),dates_ticks)
 	plt.canvas_color("black")
 	plt.axes_color("black")
 	plt.ticks_color("white")
 	plt.show()
-
-	return pandas.DataFrame.from_dict(out)
 
 
 def main():
@@ -382,7 +422,8 @@ def main():
 	for i in range(len(apis)): print (i,apis[i]) # prints unique api types
 	while True:
 		try:
-			num_api = int(input(">"))
+			num_api = input(">")
+			num_api = int(num_api)
 			selected = datasets.loc[datasets["api_type"]==apis[num_api]].reset_index(drop=True)
 			break
 		except:
@@ -415,7 +456,8 @@ def main():
 	
 	while True:
 		try:
-			d1 = dateparser.parse(input("Start date:\n"),date_formats=DATE_FORMATS)
+			d1 = input("Start date:\n")
+			d1 = dateparser.parse(d1,date_formats=DATE_FORMATS)
 			d1 = d1.strftime("%Y-%m-%d")
 			break
 		except:
@@ -424,7 +466,8 @@ def main():
 
 	while True:
 		try:
-			d2 = dateparser.parse(input("End date:\n"),date_formats=DATE_FORMATS)
+			d2 = input("End date:\n")
+			d2 = dateparser.parse(d2,date_formats=DATE_FORMATS)
 			d2 = d2.strftime("%Y-%m-%d")
 			break
 		except:
@@ -453,15 +496,12 @@ def main():
 			pass
 
 	data = get_data_nice(api_type=selected.loc[0].api_type,params=params_ids,loc=locs_inp_ids,d1=d1,d2=d2)
+	data_formatted = format_data(data,locs)
+	
+	print(tabulate.tabulate(data_formatted,headers="keys"))
 
-	print(tabulate.tabulate(data,headers="keys"))
-	if data.shape[0] > 0:
-		data_print = plot_data(data,locs)
-		data_print.dropna() # drops empty rows
-	else:
-		print("No data from the selected station in the given time range!")
-		exit()
-
+	plot_data(data_formatted)
+	
 	while True:
 		_save = input("Save data? [y/n]\n>")
 		if _save in ["y","n"]:
@@ -472,8 +512,10 @@ def main():
 		if _name == "":
 			_name = "data_%s" % (time.time())
 		filename = _name+".xlsx"
-		data_print.to_excel(filename)
+		data_formatted.replace("nan",None,inplace=True)
+		data_formatted.to_excel(filename)
 		print("Data saved to %s!" % filename)
 
 if __name__ == "__main__":
 	main()
+	#main("4","10,20","1970","1975","0,10,20")
