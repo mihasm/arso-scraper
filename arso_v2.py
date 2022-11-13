@@ -378,7 +378,6 @@ def format_data(data,locs):
 				num_empty+=1
 		if num_empty == len(headerlist):
 			rows_to_delete.append(i)
-	print(rows_to_delete)
 
 	print("Deleting empty rows")
 	for name,lst in out.items():
