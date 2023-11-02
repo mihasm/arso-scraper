@@ -22,8 +22,11 @@ import numpy as np
 from matplotlib import pyplot as plt2
 from bs4 import BeautifulSoup as bs
 import os
+import shutil
 import time
 import math
+
+from draw_country import draw_ascii_path
 
 
 pandas.options.mode.chained_assignment = None  # default='warn'
@@ -46,6 +49,23 @@ API_TYPES = { # data frequency in Hz
 	"yearly":1/(365*24*60*60), # yearly
 	"yearly-with-months":1/(12*24*60*60), # yearly-with-months
 }
+
+def get_console_width():
+    # Try to get size via os.get_terminal_size()
+    try:
+        return int(os.get_terminal_size().columns)
+    except (AttributeError, ValueError, OSError):
+        pass
+
+    # Try to get size via shutil.get_terminal_size()
+    try:
+        return int(shutil.get_terminal_size().columns)
+    except (AttributeError, ValueError, OSError):
+        pass
+
+    # Default to 80 columns if unable to determine console width
+    return 80
+
 
 def progressbar(num_done,total,prepend="",additional="",length=20):
 	"""Prints and flushes a simple progress bar.
@@ -474,6 +494,10 @@ def main():
 			pass
 	
 	locs = get_locations(d1,d2,needed_station_types)
+
+	tuples_list = [(float(row['lat']), float(row['lon']), index) for index, row in locs.iterrows()]
+
+	draw_ascii_path(get_console_width(),tuples_list)
 
 	if len(locs.index) == 0:
 		print("No locations with given parameters.")
